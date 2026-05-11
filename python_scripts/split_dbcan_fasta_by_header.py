@@ -13,44 +13,51 @@ def split_dbcan_fasta_by_prefix(input_file, output_dir):
     subfamily_regex = r"^(GH|GT|PL|CE|AA|CBM)\d+_\d+"
     multiple_family_count = {}
 
-    with open(input_file, "r") as infile:
-        for record in SeqIO.parse(infile, "fasta"):
-            cazyme_families = set()  # Use set to avoid duplicates
-            header_parts = record.id.split("|")
+    file_handles = {}
+    try:
+        with open(input_file, "r") as infile:
+            for record in SeqIO.parse(infile, "fasta"):
+                cazyme_families = set()  # Use set to avoid duplicates
+                header_parts = record.id.split("|")
 
-            # extract all CAZyme families from the header
-            for part in header_parts:
-                # First check for subfamily pattern (e.g., GH13_31)
-                if re.match(subfamily_regex, part):
-                    # Add the subfamily
-                    cazyme_families.add(part)
-                    # Extract and add the parent family (e.g., GH13 from GH13_31)
-                    parent_family = re.match(parent_family_regex, part).group(0)
-                    cazyme_families.add(parent_family)
+                # extract all CAZyme families from the header
+                for part in header_parts:
+                    # First check for subfamily pattern (e.g., GH13_31)
+                    if re.match(subfamily_regex, part):
+                        # Add the subfamily
+                        cazyme_families.add(part)
+                        # Extract and add the parent family (e.g., GH13 from GH13_31)
+                        parent_family = re.match(parent_family_regex, part).group(0)
+                        cazyme_families.add(parent_family)
 
-                if len(cazyme_families) > 6:
-                    print(f"Warning: More than 6 CAZyme families found in header: {record.id}")
-                
-                # Then check for parent family pattern (e.g., GH13)
-                elif re.match(parent_family_regex, part):
-                    cazyme_families.add(part)
+                    if len(cazyme_families) > 6:
+                        print(f"Warning: More than 6 CAZyme families found in header: {record.id}")
+                    
+                    # Then check for parent family pattern (e.g., GH13)
+                    elif re.match(parent_family_regex, part):
+                        cazyme_families.add(part)
 
-            if not cazyme_families:
-                print(f"Warning: No CAZyme family found in header: {record.id}")
-                continue
+                if not cazyme_families:
+                    print(f"Warning: No CAZyme family found in header: {record.id}")
+                    continue
 
-            # Convert set back to list for consistency
-            cazyme_families = list(cazyme_families)
+                # Convert set back to list for consistency
+                cazyme_families = list(cazyme_families)
 
-            # record the length of the families
-            multiple_family_count[len(cazyme_families)] = multiple_family_count.get(len(cazyme_families), 0) + 1
+                # record the length of the families
+                multiple_family_count[len(cazyme_families)] = multiple_family_count.get(len(cazyme_families), 0) + 1
 
-            # write the record to each corresponding family file
-            for family in cazyme_families:
-                output_file = os.path.join(output_dir, f"{family}.fasta")
-                with open(output_file, "a") as outfile:
-                    SeqIO.write(record, outfile, "fasta")
-    
+                # write the record to each corresponding family file, keeping files open
+                for family in cazyme_families:
+                    if family not in file_handles:
+                        output_file = os.path.join(output_dir, f"{family}.fasta")
+                        file_handles[family] = open(output_file, "a")
+                    SeqIO.write(record, file_handles[family], "fasta")
+    finally:
+        # Close all open file handles
+        for fh in file_handles.values():
+            fh.close()
+
     print("\nSummary of sequences with multiple CAZyme families:")
     for count, num_sequences in sorted(multiple_family_count.items()):
         print(f"{num_sequences} sequences with {count} CAZyme families")

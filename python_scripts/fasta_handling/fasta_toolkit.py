@@ -32,19 +32,19 @@ def load_fasta(filepath):
     return list(SeqIO.parse(filepath, "fasta"))
 
 
-def remove_trailing_stars(seq_records):
+def remove_all_stars(seq_records):
     """
-    Removes all '*' characters from the end of the sequence in each SeqRecord object in a list.
+    Removes all '*' characters from sequences in each SeqRecord object.
 
     Args:
         seq_records (list of SeqRecord): List of SeqRecord objects.
 
     Returns:
-        list of SeqRecord: New list with trailing '*' characters removed from each sequence.
+        list of SeqRecord: New list with all '*' characters removed.
     """
     cleaned_records = []
     for seq_record in seq_records:
-        new_seq = seq_record.seq.rstrip('*')
+        new_seq = str(seq_record.seq).replace('*', '')
         cleaned_record = SeqRecord(
             Seq(new_seq),
             id=seq_record.id,
@@ -71,12 +71,14 @@ def write_fasta(seq_records, output_filepath):
         SeqIO.write(seq_records, output_handle, "fasta")
 
 
-def print_fasta_stats(seq_records):
+def print_fasta_stats(seq_records, min_length=50, max_length=1000):
     """
     Prints statistics for a list of SeqRecord objects.
 
     Args:
         seq_records (list of SeqRecord): List of SeqRecord objects.
+        min_length (int): Minimum sequence length to consider.
+        max_length (int): Maximum sequence length to consider.
     """
     num_seqs = len(seq_records)
     lengths = [len(record.seq) for record in seq_records]
@@ -95,10 +97,31 @@ def print_fasta_stats(seq_records):
     print(f"Invalid characters (not in amino acid alphabet): {', '.join(sorted(invalid_chars)) if invalid_chars else 'None'}")
     num_not_start_with_M = sum(1 for record in seq_records if not str(record.seq).startswith('M'))
     print(f"Number of sequences not starting with 'M': {num_not_start_with_M}")
+
+    # print the number of sequences containing internal stop codons
+    num_internal_stops = sum(1 for record in seq_records if '*' in str(record.seq[:-1]))
+    print(f"Number of sequences with internal stop codons: {num_internal_stops}")
+
+    # print the number of sequences containing non-standard amino acids (B, X, Z, U, O)
+    non_standard_aas = set("BXZUO")
+    num_non_standard = sum(1 for record in seq_records if any(aa in non_standard_aas for aa in str(record.seq)))
+    print(f"Number of sequences with non-standard amino acids (B, X, Z, U, O): {num_non_standard}")
+
+    # print the number of sequences with length higher than 1000
+    num_long_seqs = sum(1 for record in seq_records if len(record.seq) > max_length)
+    print(f"Number of sequences longer than {max_length} amino acids: {num_long_seqs}")
+    
+    record_long = [record.id for record in seq_records if len(record.seq) > max_length]
+    # print the number of sequences with length lower than 50
+    num_short_seqs = sum(1 for record in seq_records if len(record.seq) < min_length)
+    print(f"Number of sequences shorter than {min_length} amino acids: {num_short_seqs}")
+    record_short = [record.id for record in seq_records if len(record.seq) < min_length]
+    print(f"IDs of sequences longer than {max_length} amino acids: {', '.join(sorted(record_long)) if record_long else 'None'}")
+    print(f"IDs of sequences shorter than {min_length} amino acids: {', '.join(sorted(record_short)) if record_short else 'None'}")
     return
 
 
-def plot_length_histogram(seq_records, bins=50, show=True, save_path=None):
+def plot_length_histogram(seq_records, bins=100, show=True, save_path=None):
     """
     Plots a histogram of sequence lengths.
 
@@ -110,7 +133,7 @@ def plot_length_histogram(seq_records, bins=50, show=True, save_path=None):
     """
     lengths = [len(record.seq) for record in seq_records]
     plt.figure(figsize=(8, 6))
-    plt.hist(lengths, bins=bins, color='skyblue', edgecolor='black')
+    plt.hist(lengths, bins=bins, color='skyblue', edgecolor='black', log=False)
     plt.title('Sequence Length Distribution')
     plt.xlabel('Sequence Length')
     plt.ylabel('Count')
@@ -153,13 +176,67 @@ def plot_amino_acid_composition(seq_records, show=True, save_path=None):
     plt.close()
 
 
+def filter_fasta_by_length(seq_records, min_length=None, max_length=None):
+    """
+    Filters a list of SeqRecord objects by sequence length.
+
+    Args:
+        seq_records (list of SeqRecord): List of SeqRecord objects.
+        min_length (int or None): Minimum length to keep (inclusive). If None, no minimum filter is applied.
+        max_length (int or None): Maximum length to keep (inclusive). If None, no maximum filter is applied.
+
+    Returns:
+        list of SeqRecord: Filtered list of SeqRecord objects.
+    """
+    filtered_records = []
+    for record in seq_records:
+        seq_length = len(record.seq)
+        if (min_length is None or seq_length >= min_length) and (max_length is None or seq_length <= max_length):
+            filtered_records.append(record)
+    return filtered_records
+
+
+def filter_fasta_by_aa_content(seq_records, allowed_aas="ACDEFGHIKLMNPQRSTVWY"):
+    """
+    Filters a list of SeqRecord objects by allowed amino acid content.
+
+    Args:
+        seq_records (list of SeqRecord): List of SeqRecord objects.
+        allowed_aas (set of str): Set of allowed amino acid characters.
+
+    Returns:
+        list of SeqRecord: Filtered list of SeqRecord objects.
+    """
+    filtered_records = []
+    for record in seq_records:
+        if all(aa in allowed_aas for aa in str(record.seq)):
+            filtered_records.append(record)
+    return filtered_records
+
+def afa_to_fa(afa_file, output_fasta):
+    """
+    Converts an AFA (aligned FASTA) file to a standard FASTA file by removing gaps.
+
+    Args:
+        afa_file (str): Path to the input AFA file.
+        output_fasta (str): Path to the output FASTA file.
+    """
+    seq_records = load_fasta(afa_file)
+    for record in seq_records:
+        seq_str = str(record.seq).replace("-", "").replace(".", "")
+        record.seq = Seq(seq_str.upper())
+    write_fasta(seq_records, output_fasta)
+
 __all__ = [
     "load_fasta",
-    "remove_trailing_stars",
+    "remove_all_stars",
     "write_fasta",
     "print_fasta_stats",
     "plot_length_histogram",
     "plot_amino_acid_composition",
+    "filter_fasta_by_length",
+    "filter_fasta_by_aa_content",
+    "afa_to_fa"
 ]
 
 
