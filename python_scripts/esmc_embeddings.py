@@ -23,7 +23,6 @@ def main(fasta_file: str, output_file: str):
         # Mean pool over sequence dimension (dim=1) after squeezing batch
         embeddings = output.embeddings.squeeze(0).mean(dim=0)  # per-sequence embedding
         embeddings_dict[record.id] = embeddings.cpu()
-        print(f"{record.id}: {embeddings.shape}")
     
     # Save embeddings to torch file
     torch.save(embeddings_dict, output_file)
