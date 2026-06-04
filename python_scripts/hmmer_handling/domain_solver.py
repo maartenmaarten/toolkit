@@ -170,7 +170,7 @@ def main():
     args = parser.parse_args()
 
     # Parse
-    header_lines, all_hits = parse_domtblout(args.input)
+    _, all_hits = parse_domtblout(args.input)
     print(f"Parsed {len(all_hits)} domain hits", file=sys.stderr)
 
     # Filter by e-value
@@ -198,14 +198,33 @@ def main():
         file=sys.stderr,
     )
 
-    # Output — same domtblout format as input, preserving header
+    # Output — tab-separated table
+    tsv_header = "\t".join([
+        "protein_name", "protein_len",
+        "domain_name", "domain_acc",
+        "domain_num", "domain_of",
+        "i_evalue", "domain_score",
+        "hmm_from", "hmm_to",
+        "ali_from", "ali_to",
+        "env_from", "env_to",
+        "acc", "description",
+    ])
     out = sys.stdout if args.output == "-" else open(args.output, "w")
     try:
-        for line in header_lines:
-            out.write(line)
+        out.write(tsv_header + "\n")
         for protein in sorted(resolved.keys()):
             for h in resolved[protein]:
-                out.write(h.raw_line)
+                row = "\t".join([
+                    h.protein_name, str(h.protein_len),
+                    h.domain_name, h.domain_acc,
+                    str(h.domain_num), str(h.domain_of),
+                    str(h.i_evalue), str(h.domain_score),
+                    str(h.hmm_from), str(h.hmm_to),
+                    str(h.ali_from), str(h.ali_to),
+                    str(h.env_from), str(h.env_to),
+                    str(h.acc), h.description,
+                ])
+                out.write(row + "\n")
     finally:
         if out is not sys.stdout:
             out.close()
