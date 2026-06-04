@@ -38,7 +38,7 @@ def main(
     )
     print(f"Using device: {device}")
 
-    client = ESMC.from_pretrained("esmc_600m").to(device)
+    client = ESMC.from_pretrained("esmc_300m").to(device)
 
     # Resume from an existing checkpoint so interrupted runs don't restart from scratch
     out_path = Path(output_file)
