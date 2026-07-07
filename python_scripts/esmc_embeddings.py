@@ -11,6 +11,7 @@ def main(
     fasta_file: str,
     output_file: str,
     checkpoint_every: int = 500,
+    layer: int = -1,
 ):
     sequences = list(SeqIO.parse(fasta_file, "fasta"))
     print(f"Loaded {len(sequences)} sequences")
@@ -68,6 +69,11 @@ def main(
 
     torch.save(embeddings_dict, out_path)
     print(f"\nSaved {len(embeddings_dict)} embeddings → {out_path}")
+
+    layer_embeddings = {k: v[layer] for k, v in embeddings_dict.items()}
+    layer_path = out_path.with_name(f"{out_path.stem}_layer{layer}{out_path.suffix}")
+    torch.save(layer_embeddings, layer_path)
+    print(f"Saved layer {layer} embeddings → {layer_path}")
 
 
 if __name__ == "__main__":
