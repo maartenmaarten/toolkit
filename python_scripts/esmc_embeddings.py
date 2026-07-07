@@ -38,7 +38,7 @@ def main(
     )
     print(f"Using device: {device}")
 
-    client = ESMC.from_pretrained("esmc_300m").to(device)
+    client = ESMC.from_pretrained("esmc_600m").to(device)
 
     # Resume from an existing checkpoint so interrupted runs don't restart from scratch
     out_path = Path(output_file)
@@ -57,9 +57,10 @@ def main(
             protein_tensor = client.encode(protein)
             output = client.logits(
                 protein_tensor,
-                LogitsConfig(sequence=True, return_embeddings=True),
+                LogitsConfig(sequence=True, return_mean_hidden_states=True),
             )
-            embeddings_dict[record.id] = output.embeddings.squeeze(0).mean(dim=0).cpu()
+            # (n_layers, hidden_dim) — mean-pooled per layer
+            embeddings_dict[record.id] = output.mean_hidden_state.squeeze(0).cpu()
 
             if (i + 1) % checkpoint_every == 0:
                 torch.save(embeddings_dict, out_path)
