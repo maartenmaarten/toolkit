@@ -10,7 +10,9 @@ def main(
     fasta_file: str,
     output_file: str,
     checkpoint_every: int = 500,
-    n_layers: int = 10,
+    n_layers: int = 1,
+    all_layers: bool = False,
+    full: bool = False,
     batch_size: int = 8,
 ):
     sequences = list(SeqIO.parse(fasta_file, "fasta"))
@@ -43,8 +45,12 @@ def main(
     pad_token_id = client.tokenizer.pad_token_id
 
     n_layers_total = len(client.transformer.blocks)
-    layer_indices = list(range(n_layers_total - n_layers, n_layers_total))
-    print(f"Model has {n_layers_total} layers; saving layers {layer_indices}")
+    layer_indices = (
+        list(range(n_layers_total)) if all_layers
+        else list(range(n_layers_total - n_layers, n_layers_total))
+    )
+    kind = "full + mean" if full else "mean only"
+    print(f"Model has {n_layers_total} layers; saving layers {layer_indices} ({kind})")
 
     # One file per layer, per kind (full per-residue vs. mean-pooled), named so
     # ML_utilities.load_embeddings can read any of them as-is: a flat
@@ -60,9 +66,10 @@ def main(
     # Resume from existing checkpoints so interrupted runs don't restart from scratch
     full_by_layer, mean_by_layer = {}, {}
     for layer_idx in layer_indices:
-        full_by_layer[layer_idx] = (
-            torch.load(full_path(layer_idx), map_location="cpu") if full_path(layer_idx).exists() else {}
-        )
+        if full:
+            full_by_layer[layer_idx] = (
+                torch.load(full_path(layer_idx), map_location="cpu") if full_path(layer_idx).exists() else {}
+            )
         mean_by_layer[layer_idx] = (
             torch.load(mean_path(layer_idx), map_location="cpu") if mean_path(layer_idx).exists() else {}
         )
@@ -80,7 +87,8 @@ def main(
 
     def save_all():
         for layer_idx in layer_indices:
-            torch.save(full_by_layer[layer_idx], full_path(layer_idx))
+            if full:
+                torch.save(full_by_layer[layer_idx], full_path(layer_idx))
             torch.save(mean_by_layer[layer_idx], mean_path(layer_idx))
 
     n_since_checkpoint = 0
@@ -98,7 +106,8 @@ def main(
                 for layer_idx in layer_indices:
                     # Trim the <cls>/<eos> special tokens, keep only real residue positions.
                     per_residue = hidden_states[layer_idx, i, 1 : valid_len - 1, :].cpu()
-                    full_by_layer[layer_idx][record.id] = per_residue
+                    if full:
+                        full_by_layer[layer_idx][record.id] = per_residue
                     mean_by_layer[layer_idx][record.id] = per_residue.mean(dim=0)
 
             n_since_checkpoint += len(batch)
@@ -110,7 +119,10 @@ def main(
     save_all()
     print(f"\nSaved {len(mean_by_layer[layer_indices[-1]])} embeddings for layers {layer_indices}")
     for layer_idx in layer_indices:
-        print(f"  layer {layer_idx}: {full_path(layer_idx)}  (full)   {mean_path(layer_idx)}  (mean)")
+        line = f"  layer {layer_idx}: {mean_path(layer_idx)}  (mean)"
+        if full:
+            line += f"   {full_path(layer_idx)}  (full)"
+        print(line)
 
 
 if __name__ == "__main__":
