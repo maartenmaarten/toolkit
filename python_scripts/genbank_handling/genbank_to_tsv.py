@@ -5,9 +5,12 @@
 #   id, name, description, dbxrefs
 #   annotations.<key>         e.g. annotations.organism, annotations.taxonomy
 #   features.<type>.<qualifier>  e.g. features.CDS.product, features.CDS.db_xref
+#   taxon_id                  the source feature's NCBI taxon db_xref (e.g.
+#                              "taxon:77133" -> "77133") — a stable key for
+#                              offline rank resolution with taxonkit.
 #
 # Default columns (if not specified):
-#   id, description, annotations.organism, annotations.taxonomy,
+#   id, description, annotations.organism, taxon_id, annotations.taxonomy,
 #   annotations.keywords, annotations.comment,
 #   features.CDS.product, features.CDS.gene, features.CDS.db_xref,
 #   features.CDS.EC_number, features.CDS.note
@@ -22,6 +25,7 @@ DEFAULT_COLUMNS = [
     "id",
     "description",
     "annotations.organism",
+    "taxon_id",
     "annotations.taxonomy",
     "annotations.keywords",
     "annotations.comment",
@@ -33,8 +37,24 @@ DEFAULT_COLUMNS = [
 ]
 
 
+def extract_taxon_id(record):
+    """Pull the numeric NCBI taxon ID from the source feature's db_xref
+    (e.g. "taxon:77133" -> "77133") — a stable key for offline rank
+    resolution with taxonkit, unlike the positional annotations.taxonomy list.
+    """
+    for feat in record.features:
+        if feat.type == "source":
+            for xref in feat.qualifiers.get("db_xref", []):
+                if xref.startswith("taxon:"):
+                    return xref.split(":", 1)[1]
+    return ""
+
+
 def extract_value(record, column):
     """Extract a value from a SeqRecord using a dot-notation column spec."""
+    if column == "taxon_id":
+        return extract_taxon_id(record)
+
     parts = column.split(".", 2)
 
     if parts[0] == "annotations":
@@ -71,7 +91,7 @@ def extract_value(record, column):
 
 def collect_all_columns(record):
     """Return all available column paths for a record."""
-    cols = ["id", "name", "description", "dbxrefs"]
+    cols = ["id", "name", "description", "dbxrefs", "taxon_id"]
     for key in record.annotations:
         cols.append(f"annotations.{key}")
     seen_types = {}
