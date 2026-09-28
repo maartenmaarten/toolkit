@@ -10,6 +10,13 @@ The annotation TSV has a header and is joined to the FASTA on accession
 ("['GH0', 'GH43']") - sequences with multiple families are written to each
 family's output file.
 
+Splitting is done at subfamily resolution (GH43_26) wherever the Family
+cell gives it, rather than collapsing to the plain family (GH43). Some
+multi-family rows list both a bare family and one of its subfamilies for
+the same domain (e.g. "['GH0', 'GH16', 'GH16_1']") - in that case the bare
+entry is dropped in favor of the more specific subfamily one, so the
+sequence isn't split into both GH16 and GH16_1.
+
 Usage:
     python split_cazyme_fasta.py --fasta all_cazymes.fa --outdir split_by_family
 """
@@ -45,6 +52,16 @@ def parse_families(raw):
     return [raw]
 
 
+def prefer_subfamilies(families):
+    """Drop a bare family label when a subfamily of it is also present.
+
+    E.g. ["GH0", "GH16", "GH16_1"] -> ["GH0", "GH16_1"]: the bare "GH16"
+    is redundant with the more specific "GH16_1" for the same domain.
+    """
+    subfamily_prefixes = {f.split("_", 1)[0] for f in families if "_" in f}
+    return [f for f in families if "_" in f or f not in subfamily_prefixes]
+
+
 def load_family_map(annotation_path, id_col, family_col, wanted_ids):
     """Map accession -> list of families, for accessions in `wanted_ids`.
 
@@ -69,7 +86,8 @@ def load_family_map(annotation_path, id_col, family_col, wanted_ids):
             accession = fields[id_idx]
             if accession not in wanted_ids:
                 continue
-            family_map[accession] = parse_families(fields[family_idx])
+            families = prefer_subfamilies(parse_families(fields[family_idx]))
+            family_map[accession] = families
     return family_map
 
 
