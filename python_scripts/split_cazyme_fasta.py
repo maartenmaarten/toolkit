@@ -10,11 +10,13 @@ The annotation TSV has a header and is joined to the FASTA on accession
 ("['GH0', 'GH43']") - sequences with multiple families are written to each
 family's output file.
 
-Splitting is done at subfamily resolution (GH43_26) wherever the Family
-cell gives it, rather than collapsing to the plain family (GH43). Some
-multi-family rows list both a bare family and one of its subfamilies for
-the same domain (e.g. "['GH0', 'GH16', 'GH16_1']") - in that case the bare
-entry is dropped in favor of the more specific subfamily one, so the
+Splitting is done at subfamily resolution (GH43_1) rather than collapsing
+to the plain family (GH43), wherever the Family cell gives it directly
+(e.g. "GH43_1", or "['GH0', 'GH16', 'GH16_1']" for multi-family proteins).
+Only the Family column is consulted - annotation files without a subfamily
+breakdown there simply split at family resolution. If a bare family and
+one of its subfamilies both end up in a protein's family list (e.g.
+"GH16" and "GH16_1" for the same domain), the bare one is dropped so the
 sequence isn't split into both GH16 and GH16_1.
 
 Usage:
