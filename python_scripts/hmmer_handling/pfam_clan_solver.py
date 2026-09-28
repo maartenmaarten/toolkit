@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+p#!/usr/bin/env python3
 """
 Resolve overlapping Pfam domain hits using clan-based filtering.
 
