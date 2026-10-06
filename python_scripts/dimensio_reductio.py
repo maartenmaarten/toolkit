@@ -179,7 +179,7 @@ def plot_embedding(coords, xlabel, ylabel, color_by=None, title="ESM embeddings"
             palette = dict(zip(cats, sns.color_palette(
                 "tab10" if len(cats) <= 10 else "tab20", n_colors=len(cats))))
             sns.scatterplot(data=known, x="x", y="y", hue="group", hue_order=cats,
-                             palette=palette, s=10, alpha=0.6, linewidth=0, ax=ax)
+                             palette=palette, s=20, alpha=0.6, linewidth=0, ax=ax)
             ax.legend(markerscale=3, fontsize=8, frameon=True, framealpha=0.7,
                       loc="best", title=None)
 

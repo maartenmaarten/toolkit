@@ -13,14 +13,22 @@ Accepts two input formats (auto-detected):
        end     : end, end_pos, env_to, ali_to, stop
 
 Protein lengths are always derived from the input FASTA.
+
+Optional topology layer (--topology): a DeepTMHMM-style .3line file adds a
+black box labelled "SP" for every signal peptide (run of 'S' in the topology
+string) and "TM" for every transmembrane segment (run of 'M') to the same
+protein rows as the domains.
 """
 
 import csv
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 import seaborn as sns
+
+from itol_from_topology import parse_3line
 
 
 # ── column alias maps (plain TSV mode) ────────────────────────────────────────
@@ -32,6 +40,10 @@ END_ALIASES    = {"end",   "end_pos",   "env_to",   "ali_to",   "stop"}
 
 SHAPE   = "RE"
 PALETTE = sns.color_palette("Paired").as_hex()
+
+# topology letter -> (box label, legend name); all topology boxes are black
+TOPO_COLOR  = "#FF00E1"
+TOPO_LABELS = {"S": ("SP", "Signal peptide"), "M": ("TM", "Transmembrane")}
 
 # HMMER domtblout fixed column positions (0-based)
 _DOM_COLS = {
@@ -177,6 +189,21 @@ def _parse_tsv(path: str) -> list:
     return rows
 
 
+def _topology_rows(path: str) -> list:
+    """SP/TM boxes (1-based inclusive) from a .3line file, as domain rows."""
+    pattern = "|".join(f"{letter}+" for letter in TOPO_LABELS)
+    rows = []
+    for seq_id, (_, topology) in parse_3line(path).items():
+        for m in re.finditer(pattern, topology):
+            rows.append({
+                "seq_id": seq_id,
+                "domain": TOPO_LABELS[m.group()[0]][0],
+                "start":  m.start() + 1,
+                "end":    m.end(),
+            })
+    return rows
+
+
 # ── main conversion ────────────────────────────────────────────────────────────
 
 def convert_domains(
@@ -184,6 +211,7 @@ def convert_domains(
     domains_path: str,
     out_path: str,
     evalue_threshold: float = 1e-5,
+    topology_path: Optional[str] = None,
 ):
     lengths = read_fasta_lengths(fasta_path)
 
@@ -199,6 +227,14 @@ def convert_domains(
 
     all_domains = [r["domain"] for r in rows]
     colors = assign_colors(all_domains)
+
+    topo_rows = []
+    if topology_path:
+        topo_rows = _topology_rows(topology_path)
+        print(f"  Added {len(topo_rows)} SP/TM boxes from {topology_path}")
+        rows += topo_rows
+    topo_colors = {label: TOPO_COLOR for label, _ in TOPO_LABELS.values()} if topology_path else {}
+    box_colors = {**colors, **topo_colors}
 
     by_seq = defaultdict(list)
     for r in rows:
@@ -219,13 +255,21 @@ def convert_domains(
     lines.append("COLOR\t#000000")
     lines.append("")
     lines.append("LEGEND_TITLE\tDomain families")
-    legend_shapes = "\t".join(SHAPE for _ in sorted(colors))
-    legend_colors = "\t".join(colors[d] for d in sorted(colors))
-    legend_labels = "\t".join(sorted(colors))
+    legend = [(d, colors[d]) for d in sorted(colors)]
+    if topology_path:
+        legend += [(f"{name} ({label})", TOPO_COLOR) for label, name in TOPO_LABELS.values()]
+    legend_shapes = "\t".join(SHAPE for _ in legend)
+    legend_colors = "\t".join(c for _, c in legend)
+    legend_labels = "\t".join(l for l, _ in legend)
     lines.append(f"LEGEND_SHAPES\t{legend_shapes}")
     lines.append(f"LEGEND_COLORS\t{legend_colors}")
     lines.append(f"LEGEND_LABELS\t{legend_labels}")
     lines.append("")
+    if topology_path:
+        # print "SP"/"TM" inside the black boxes
+        lines.append("SHOW_DOMAIN_LABELS\t1")
+        lines.append("LABELS_ON_TOP\t0")
+        lines.append("")
     lines.append("DATA")
 
     for seq_id, domains in sorted(by_seq.items()):
@@ -233,7 +277,7 @@ def convert_domains(
             continue
         seq_len = lengths[seq_id]
         domain_fields = "\t".join(
-            f"{SHAPE}|{d['start']}|{d['end']}|{colors[d['domain']]}|{d['domain']}"
+            f"{SHAPE}|{d['start']}|{d['end']}|{box_colors[d['domain']]}|{d['domain']}"
             for d in sorted(domains, key=lambda x: x["start"])
         )
         lines.append(f"{seq_id}\t{seq_len}\t{domain_fields}")
@@ -241,7 +285,7 @@ def convert_domains(
     Path(out_path).write_text("\n".join(lines) + "\n")
     print(
         f"  Wrote {len(by_seq) - len(unknown)} sequences, "
-        f"{len(all_domains)} domain entries, "
+        f"{len(all_domains)} domain entries, {len(topo_rows)} SP/TM boxes, "
         f"{len(colors)} unique domain families"
     )
 
@@ -259,5 +303,9 @@ if __name__ == "__main__":
         "--evalue", type=float, default=1e-5,
         help="E-value threshold for domtblout filtering (default: 1e-5)"
     )
+    parser.add_argument(
+        "--topology",
+        help="Optional DeepTMHMM .3line file; adds black SP/TM boxes to the proteins"
+    )
     args = parser.parse_args()
-    convert_domains(args.fasta, args.domains, args.out, args.evalue)
+    convert_domains(args.fasta, args.domains, args.out, args.evalue, args.topology)
