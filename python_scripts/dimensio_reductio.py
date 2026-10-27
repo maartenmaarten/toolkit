@@ -16,7 +16,10 @@ import seaborn as sns
 import torch
 import umap
 from matplotlib import pyplot as plt
+from matplotlib.cm import ScalarMappable
 from matplotlib.collections import LineCollection
+from matplotlib.colors import Normalize
+from matplotlib.lines import Line2D
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from tmap import TMAP
@@ -30,6 +33,19 @@ DEFAULT_ANNOT_TSV = (
     "2026-06-29_download/CAZy_characterized/GH43_characterized.tsv"
 )
 DEFAULT_OUTPUT_DIR = "projections"
+
+# Seed for t-SNE and UMAP, so the same embeddings give the same map every run
+# (UMAP runs single-threaded when seeded)
+RANDOM_STATE = 42
+
+# Only this many of the most common colour categories get a colour (tab20's);
+# points in any other category are grey, like unannotated ones
+MAX_COLOURS = 20
+
+# Marker shapes for plot_embedding's shape_by (all filled: seaborn can't mix
+# filled and line markers); points without a shape value get an X.
+SHAPE_MARKERS = ["o", "s", "D", "^", "v", "P", "<", ">", "p", "h"]
+NO_SHAPE_MARKER = "X"
 
 
 def parse_args() -> argparse.Namespace:
@@ -95,11 +111,13 @@ def pca_project(embeddings):
 
 
 def tsne_project(embeddings, perplexity=30):
-    return TSNE(n_components=2, perplexity=perplexity).fit_transform(standardize(embeddings))
+    tsne = TSNE(n_components=2, perplexity=perplexity, random_state=RANDOM_STATE)
+    return tsne.fit_transform(standardize(embeddings))
 
 
 def umap_project(embeddings, n_neighbors=20, min_dist=0.1, metric="cosine"):
-    reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, metric=metric)
+    reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, metric=metric,
+                        random_state=RANDOM_STATE)
     return reducer.fit_transform(standardize(embeddings))
 
 
@@ -153,7 +171,41 @@ def build_meta(ids: np.ndarray, annot_df: pd.DataFrame) -> pd.DataFrame:
 # ----------------------------------------------------------------------
 # Plot
 # ----------------------------------------------------------------------
-def plot_embedding(coords, xlabel, ylabel, color_by=None, title="ESM embeddings", edges=None):
+def category_palette(cats):
+    """{category: RGB} for the sorted, non-missing colour categories, from
+    tab20 (so at most MAX_COLOURS of them)."""
+    if len(cats) > MAX_COLOURS:
+        raise ValueError(f"{len(cats)} colour categories; tab20 has only {MAX_COLOURS} colours")
+    return dict(zip(cats, sns.color_palette("tab20", n_colors=len(cats))))
+
+
+def shape_markers(shape_by, shape_label="shape"):
+    """(shapes, {shape: matplotlib marker}) for the non-missing values of
+    shape_by, most common first so it gets the first marker (a circle);
+    missing values (key "nan") get NO_SHAPE_MARKER."""
+    values = pd.Series(np.asarray(shape_by, dtype=object)).dropna().astype(str)
+    shapes = list(values.value_counts().index)
+    if len(shapes) > len(SHAPE_MARKERS):
+        raise ValueError(f"{shape_label} has {len(shapes)} distinct values; "
+                         f"at most {len(SHAPE_MARKERS)} can get their own marker shape")
+    markers = dict(zip(shapes, SHAPE_MARKERS))
+    markers["nan"] = NO_SHAPE_MARKER
+    return shapes, markers
+
+
+def plot_embedding(coords, xlabel, ylabel, color_by=None, title="ESM embeddings", edges=None,
+                   shape_by=None, shape_label="shape", color_label="colour", point_labels=None,
+                   continuous=False):
+    """Scatter of a 2D projection, optionally coloured by color_by and with
+    the marker shape set by shape_by (one value per point; NaN = no
+    annotation, drawn as an X). With shape_by, one legend outside the axes
+    on the right lists the colours under color_label and the shapes under
+    shape_label. point_labels (one string per point) are written next to
+    the points in tiny type; save at a high dpi to read them.
+
+    With continuous, color_by holds numbers, coloured on a viridis scale with
+    a colour bar (labelled color_label) on the right; values that are not
+    numbers are grey, like NaN. A shape legend then goes inside the axes."""
     fig, ax = plt.subplots(figsize=(8, 8))
 
     if edges is not None:
@@ -162,26 +214,87 @@ def plot_embedding(coords, xlabel, ylabel, color_by=None, title="ESM embeddings"
                                           alpha=0.3, zorder=0))
 
     df = pd.DataFrame({"x": coords[:, 0], "y": coords[:, 1]})
+    markers = None
+    if shape_by is not None:
+        df["shape"] = pd.Series(np.asarray(shape_by, dtype=object)).fillna("nan").astype(str).values
+        shapes, markers = shape_markers(shape_by, shape_label)
+    style = dict(style="shape", markers=markers) if markers else {}
+
+    cats, palette = [], {}
     if color_by is None:
-        sns.scatterplot(data=df, x="x", y="y", s=4, alpha=0.6, linewidth=0,
-                         color="steelblue", ax=ax, legend=False)
+        sns.scatterplot(data=df, x="x", y="y", s=4 if not markers else 20, alpha=0.45, linewidth=0,
+                         color="steelblue", ax=ax, legend=False, **style)
     else:
-        df["group"] = pd.Series(np.asarray(color_by)).fillna("nan").astype(str).values
+        if continuous:
+            df["value"] = pd.to_numeric(pd.Series(np.asarray(color_by, dtype=object)), errors="coerce").values
+            missing = df["value"].isna()
+        else:
+            df["group"] = pd.Series(np.asarray(color_by)).fillna("nan").astype(str).values
+            group_counts = df.loc[df["group"] != "nan", "group"].value_counts()
+            if len(group_counts) > MAX_COLOURS:  # only the most common get a colour; the rest are grey
+                df.loc[~df["group"].isin(group_counts.index[:MAX_COLOURS]), "group"] = "nan"
+            missing = df["group"] == "nan"
 
-        nan_rows = df[df["group"] == "nan"]
+        nan_rows = df[missing]
         if not nan_rows.empty:
-            sns.scatterplot(data=nan_rows, x="x", y="y", s=3, alpha=0.3,
-                             color="lightgrey", linewidth=0, ax=ax, legend=False)
+            # Same size as the coloured points but more transparent, drawn underneath them
+            sns.scatterplot(data=nan_rows, x="x", y="y", s=20, alpha=0.45,
+                             color="lightgrey", linewidth=0, ax=ax, legend=False, **style)
 
-        known = df[df["group"] != "nan"]
-        cats = sorted(known["group"].unique())
+        known = df[~missing]
+        if continuous:
+            if not known.empty:
+                norm = Normalize(known["value"].min(), known["value"].max())
+                sns.scatterplot(data=known, x="x", y="y", hue="value", hue_norm=norm, palette="viridis",
+                                s=20, alpha=0.7, linewidth=0, ax=ax, legend=False, **style)
+                colorbar = fig.colorbar(ScalarMappable(norm=norm, cmap="viridis"), ax=ax,
+                                        fraction=0.04, pad=0.02)
+                colorbar.set_label(color_label, fontsize=8)
+                colorbar.ax.tick_params(labelsize=6)
+        else:
+            cats = sorted(known["group"].unique())
+            cat_counts = known["group"].value_counts()
         if cats:
-            palette = dict(zip(cats, sns.color_palette(
-                "tab10" if len(cats) <= 10 else "tab20", n_colors=len(cats))))
+            palette = category_palette(cats)
             sns.scatterplot(data=known, x="x", y="y", hue="group", hue_order=cats,
-                             palette=palette, s=20, alpha=0.6, linewidth=0, ax=ax)
-            ax.legend(markerscale=3, fontsize=8, frameon=True, framealpha=0.7,
-                      loc="best", title=None)
+                             palette=palette, s=20, alpha=0.7, linewidth=0, ax=ax,
+                             legend=not markers, **style)
+            if not markers:
+                handles, labels = ax.get_legend_handles_labels()
+                legend = ax.legend(handles, [f"{c} (n = {cat_counts[c]})" for c in labels], markerscale=1.2,
+                                   fontsize=6, labelspacing=0.3, handletextpad=0.3, borderpad=0.4,
+                                   frameon=True, framealpha=0.7, loc="best", title=None)
+                for handle in legend.legend_handles:  # opaque swatches, easier to match to the points
+                    handle.set_alpha(1)
+
+    if markers:
+        # One legend (a second one added with add_artist is left out of
+        # savefig's bbox_inches="tight" and gets clipped); an invisible
+        # handle with the column name heads each section.
+        def header(text):
+            return Line2D([], [], linestyle="none", marker="none", label=text)
+
+        def point(marker, colour, text):
+            return Line2D([], [], linestyle="", marker=marker, markersize=4, color=colour, label=text)
+
+        handles = []
+        if cats:
+            handles += [header(color_label)] + [point("o", palette[c], f"{c} (n = {cat_counts[c]})")
+                                                for c in cats] + [header("")]
+        counts = df["shape"].value_counts()
+        handles += [header(shape_label)] + [point(markers[s], "dimgrey", f"{s} (n = {counts[s]})")
+                                            for s in shapes]
+        if "nan" in counts:
+            handles.append(point(NO_SHAPE_MARKER, "dimgrey", f"no {shape_label} (n = {counts['nan']})"))
+        # Outside on the right, unless a colour bar is there already
+        place = (dict(loc="best", frameon=True, framealpha=0.7) if continuous and color_by is not None
+                 else dict(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=False))
+        ax.legend(handles=handles, fontsize=6, labelspacing=0.3, handletextpad=0.3, **place)
+
+    if point_labels is not None:
+        for (px, py), label in zip(coords, point_labels):
+            ax.annotate(str(label), (px, py), xytext=(1.5, 0), textcoords="offset points", fontsize=2,
+                        color="dimgrey", va="center")
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
