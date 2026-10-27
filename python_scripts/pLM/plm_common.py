@@ -4,13 +4,15 @@ Each script only has to load its model and define an `embed_batch` function that
 maps a list of sequences to per-residue tensors for the requested layers; this
 module handles FASTA loading/cleaning, device selection, resumable checkpointing
 and writing one {sequence_id: Tensor} .pt file per layer and kind (mean / full),
-so ML_utilities.load_embeddings and dimensio_reductio.py can read them as-is.
+named OUTPUT.<model>.<mean|full>.<size>[.layerN].pt, so
+ML_utilities.load_embeddings and dimensio_reductio.py can read them as-is.
 
 Kept compatible with Python 3.7 / old torch so seqvec_embeddings.py can import it
 from a legacy allennlp environment.
 """
 from __future__ import annotations
 
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -78,19 +80,45 @@ def select_layers(n_total, n_layers=1, all_layers=False):
     return list(range(n_total - n_layers, n_total))
 
 
+def size_tag(text):
+    """Make a model/size label safe for the dot-separated file name."""
+    return re.sub(r"[^a-z0-9-]+", "-", text.lower()).strip("-")
+
+
+def esm_size_tag(model_name):
+    """'facebook/esm2_t33_650M_UR50D' -> '650m'."""
+    m = re.search(r"_t\d+_(\d+[MB])_", model_name)
+    return m.group(1).lower() if m else size_tag(model_name.split("/")[-1])
+
+
+OUTPUT_HELP = (
+    "Output prefix (may include a directory); files are written as "
+    "OUTPUT.<model>.<mean|full>.<size>[.layerN].pt"
+)
+
+
 class EmbeddingStore:
     """Resumable per-layer output files.
 
-    For output_file "out/emb.pt" and layer 33 this writes out/emb_mean_layer33.pt
-    (mean=True) and/or out/emb_full_layer33.pt (full=True). A layer of None drops
-    the "_layer..." part, for embeddings that have no layers (one-hot).
+    Files are named OUTPUT.<model>.<kind>.<size>[.layerN].pt, e.g. with
+    output "out/gh43", model "esm2" and size "650m":
+        out/gh43.esm2.mean.650m.pt          default layer (the last one)
+        out/gh43.esm2.full.650m.layer20.pt  any other layer, with full=True
+    `default_layer` is the layer written without a ".layerN" tag; size=None
+    (one-hot) leaves the size part out.
     """
 
-    def __init__(self, output_file, layers, full=False, mean=True):
+    def __init__(self, output, model, size, layers, default_layer, full=False, mean=True):
         if not (full or mean):
             raise ValueError("EmbeddingStore needs full and/or mean output")
-        self.out = Path(output_file)
-        self.out.parent.mkdir(parents=True, exist_ok=True)
+        prefix = Path(output)
+        if prefix.suffix == ".pt":
+            prefix = prefix.with_suffix("")
+        prefix.parent.mkdir(parents=True, exist_ok=True)
+        self.prefix = prefix
+        self.model = model
+        self.size = size
+        self.default_layer = default_layer
         self.layers = list(layers)
         self.kinds = (["mean"] if mean else []) + (["full"] if full else [])
         # Resume from existing files so interrupted runs don't restart from scratch
@@ -100,8 +128,12 @@ class EmbeddingStore:
         }
 
     def path(self, kind, layer):
-        tag = f"_{kind}" if layer is None else f"_{kind}_layer{layer}"
-        return self.out.with_name(f"{self.out.stem}{tag}{self.out.suffix}")
+        parts = [self.prefix.name, self.model, kind]
+        if self.size:
+            parts.append(self.size)
+        if layer != self.default_layer:
+            parts.append(f"layer{layer}")
+        return self.prefix.with_name(".".join(parts) + ".pt")
 
     @staticmethod
     def _load(path):

@@ -12,17 +12,24 @@ import typer
 from transformers import T5EncoderModel, T5Tokenizer
 
 from plm_common import (
-    DEFAULT_MAX_LEN, EmbeddingStore, embed_all, hf_embed_batch, load_sequences,
-    pick_device, select_layers,
+    DEFAULT_MAX_LEN, OUTPUT_HELP, EmbeddingStore, embed_all, hf_embed_batch, load_sequences,
+    pick_device, select_layers, size_tag,
 )
 
 # Rostlab/prot_t5_xl_uniref50 is the full fp32 encoder-decoder (~11 GB download)
 DEFAULT_MODEL = "Rostlab/prot_t5_xl_half_uniref50-enc"
+# Size label used in the output file name (fp16 and fp32 exports of the same model
+# share one); other ids fall back to the repo name
+SIZE_TAGS = {
+    "Rostlab/prot_t5_xl_half_uniref50-enc": "xl-u50",
+    "Rostlab/prot_t5_xl_uniref50": "xl-u50",
+    "Rostlab/prot_t5_xl_bfd": "xl-bfd",
+}
 
 
 def main(
     fasta_file: str,
-    output_file: str,
+    output: str = typer.Argument(..., help=OUTPUT_HELP),
     model_name: str = typer.Option(DEFAULT_MODEL, "--model", help="HuggingFace model id"),
     checkpoint_every: int = 500,
     n_layers: int = 1,
@@ -47,7 +54,8 @@ def main(
     layers = select_layers(n_total, n_layers, all_layers)
     print(f"{model_name}: {n_total - 1} layers; saving layers {layers} ({'full + mean' if full else 'mean only'})")
 
-    store = EmbeddingStore(output_file, layers, full)
+    size = SIZE_TAGS.get(model_name) or size_tag(model_name.split("/")[-1])
+    store = EmbeddingStore(output, "prott5", size, layers, n_total - 1, full)
     # ProtT5 expects space-separated residues and only appends </s>: M K T ... </s> [<pad> ...]
     embed_all(
         sequences,

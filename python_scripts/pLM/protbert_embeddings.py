@@ -6,16 +6,18 @@ import typer
 from transformers import BertModel, BertTokenizer
 
 from plm_common import (
-    DEFAULT_MAX_LEN, EmbeddingStore, embed_all, hf_embed_batch, load_sequences,
-    pick_device, select_layers,
+    DEFAULT_MAX_LEN, OUTPUT_HELP, EmbeddingStore, embed_all, hf_embed_batch, load_sequences,
+    pick_device, select_layers, size_tag,
 )
 
 DEFAULT_MODEL = "Rostlab/prot_bert"
+# Size label used in the output file name; other ids fall back to the repo name
+SIZE_TAGS = {"Rostlab/prot_bert": "420m", "Rostlab/prot_bert_bfd": "420m-bfd"}
 
 
 def main(
     fasta_file: str,
-    output_file: str,
+    output: str = typer.Argument(..., help=OUTPUT_HELP),
     model_name: str = typer.Option(DEFAULT_MODEL, "--model", help="HuggingFace model id"),
     checkpoint_every: int = 500,
     n_layers: int = 1,
@@ -35,7 +37,8 @@ def main(
     layers = select_layers(n_total, n_layers, all_layers)
     print(f"{model_name}: {n_total - 1} layers; saving layers {layers} ({'full + mean' if full else 'mean only'})")
 
-    store = EmbeddingStore(output_file, layers, full)
+    size = SIZE_TAGS.get(model_name) or size_tag(model_name.split("/")[-1])
+    store = EmbeddingStore(output, "protbert", size, layers, n_total - 1, full)
     # ProtBERT expects space-separated residues: [CLS] M K T ... [SEP] [PAD ...]
     embed_all(
         sequences,

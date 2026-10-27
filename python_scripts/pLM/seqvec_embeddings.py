@@ -19,12 +19,14 @@ from pathlib import Path
 import typer
 from allennlp.modules.elmo import _ElmoBiLm, batch_to_ids
 
-from plm_common import DEFAULT_MAX_LEN, EmbeddingStore, embed_all, load_sequences, pick_device
+from plm_common import (
+    DEFAULT_MAX_LEN, OUTPUT_HELP, EmbeddingStore, embed_all, load_sequences, pick_device,
+)
 
 
 def main(
     fasta_file: str,
-    output_file: str,
+    output: str = typer.Argument(..., help=OUTPUT_HELP),
     model_dir: str = typer.Option(..., help="Folder with options.json and weights.hdf5"),
     checkpoint_every: int = 500,
     all_layers: bool = typer.Option(False, help="Also save layers 0, 1 and 2 separately"),
@@ -58,7 +60,8 @@ def main(
             out.append({l: per_layer[l] for l in layers})
         return out
 
-    store = EmbeddingStore(output_file, layers, full)
+    # SeqVec has a single size (93M parameters); "sum" is the untagged default layer
+    store = EmbeddingStore(output, "seqvec", "93m", layers, "sum", full)
     embed_all(sequences, embed_batch, store, batch_size, checkpoint_every)
 
 

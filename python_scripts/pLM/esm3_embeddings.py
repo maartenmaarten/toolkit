@@ -18,17 +18,19 @@ Layer numbering matches esmc_embeddings.py: 0..N-1 = transformer block outputs
 import torch
 import typer
 from esm.models.esm3 import ESM3
+from esm.utils.constants.models import ESM3_OPEN_SMALL, normalize_model_name
 from esm.utils.encoding import tokenize_sequence
 from esm.utils.misc import stack_variable_length_tensors
 
 from plm_common import (
-    DEFAULT_MAX_LEN, EmbeddingStore, embed_all, load_sequences, pick_device, select_layers,
+    DEFAULT_MAX_LEN, OUTPUT_HELP, EmbeddingStore, embed_all, load_sequences, pick_device,
+    select_layers, size_tag,
 )
 
 
 def main(
     fasta_file: str,
-    output_file: str,
+    output: str = typer.Argument(..., help=OUTPUT_HELP),
     model_name: str = typer.Option("esm3-open", "--model", help="ESM3 model name"),
     checkpoint_every: int = 500,
     n_layers: int = 1,
@@ -79,7 +81,9 @@ def main(
             for i, s in enumerate(seqs)
         ]
 
-    store = EmbeddingStore(output_file, layers, full)
+    # esm3_sm_open_v1 (1.4B) is the only ESM3 that runs locally
+    size = "sm-open" if normalize_model_name(model_name) == ESM3_OPEN_SMALL else size_tag(model_name)
+    store = EmbeddingStore(output, "esm3", size, layers, len(blocks) - 1, full)
     embed_all(sequences, embed_batch, store, batch_size, checkpoint_every)
 
 

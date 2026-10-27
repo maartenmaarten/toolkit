@@ -10,8 +10,8 @@ import typer
 from transformers import AutoTokenizer, EsmModel
 
 from plm_common import (
-    DEFAULT_MAX_LEN, EmbeddingStore, embed_all, hf_embed_batch, load_sequences,
-    pick_device, select_layers,
+    DEFAULT_MAX_LEN, OUTPUT_HELP, EmbeddingStore, embed_all, esm_size_tag, hf_embed_batch,
+    load_sequences, pick_device, select_layers,
 )
 
 # facebook/esm2_t6_8M_UR50D, _t12_35M_, _t30_150M_, _t33_650M_, _t36_3B_, _t48_15B_UR50D
@@ -20,7 +20,7 @@ DEFAULT_MODEL = "facebook/esm2_t33_650M_UR50D"
 
 def main(
     fasta_file: str,
-    output_file: str,
+    output: str = typer.Argument(..., help=OUTPUT_HELP),
     model_name: str = typer.Option(DEFAULT_MODEL, "--model", help="HuggingFace model id"),
     checkpoint_every: int = 500,
     n_layers: int = 1,
@@ -40,7 +40,7 @@ def main(
     layers = select_layers(n_total, n_layers, all_layers)
     print(f"{model_name}: {n_total - 1} layers; saving layers {layers} ({'full + mean' if full else 'mean only'})")
 
-    store = EmbeddingStore(output_file, layers, full)
+    store = EmbeddingStore(output, "esm2", esm_size_tag(model_name), layers, n_total - 1, full)
     # <cls> SEQ <eos> [<pad> ...]
     embed_all(
         sequences,
