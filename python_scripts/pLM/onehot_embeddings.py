@@ -1,8 +1,9 @@
-"""One-hot baseline: 20-dim per-residue encoding in alphabetical one-letter order
-(ACDEFGHIKLMNPQRSTVWY).
+"""One-hot baseline: per-residue (L, 20) matrices, columns in alphabetical
+one-letter order (ACDEFGHIKLMNPQRSTVWY).
 
-The mean-pooled vector is the amino-acid composition. No model, so it always
-runs on CPU and there are no layers: output is {stem}_mean.pt / {stem}_full.pt.
+Not mean-pooled: averaging one-hot over positions only gives the amino-acid
+composition. Output is {stem}_full.pt as {sequence_id: (L, 20) Tensor}; L varies
+per sequence. No model, so it always runs on CPU and there are no layers.
 """
 import torch
 import typer
@@ -22,13 +23,12 @@ def main(
     fasta_file: str,
     output_file: str,
     checkpoint_every: int = 10000,
-    full: bool = False,
     max_len: int = DEFAULT_MAX_LEN,
 ):
     sequences = load_sequences(fasta_file, max_len)
-    print(f"Alphabet: {''.join(ALPHABET)} ({'full + mean' if full else 'mean only'})")
+    print(f"Alphabet: {''.join(ALPHABET)} (full per-residue matrices)")
 
-    store = EmbeddingStore(output_file, [None], full)
+    store = EmbeddingStore(output_file, [None], full=True, mean=False)
     embed_all(
         sequences,
         lambda seqs: [{None: one_hot(s)} for s in seqs],

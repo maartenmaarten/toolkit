@@ -82,18 +82,22 @@ class EmbeddingStore:
     """Resumable per-layer output files.
 
     For output_file "out/emb.pt" and layer 33 this writes out/emb_mean_layer33.pt
-    (and out/emb_full_layer33.pt with full=True). A layer of None drops the
-    "_layer..." part, for embeddings that have no layers (one-hot).
+    (mean=True) and/or out/emb_full_layer33.pt (full=True). A layer of None drops
+    the "_layer..." part, for embeddings that have no layers (one-hot).
     """
 
-    def __init__(self, output_file, layers, full=False):
+    def __init__(self, output_file, layers, full=False, mean=True):
+        if not (full or mean):
+            raise ValueError("EmbeddingStore needs full and/or mean output")
         self.out = Path(output_file)
         self.out.parent.mkdir(parents=True, exist_ok=True)
         self.layers = list(layers)
-        self.full = full
+        self.kinds = (["mean"] if mean else []) + (["full"] if full else [])
         # Resume from existing files so interrupted runs don't restart from scratch
-        self.mean_by_layer = {l: self._load(self.path("mean", l)) for l in self.layers}
-        self.full_by_layer = {l: self._load(self.path("full", l)) for l in self.layers} if full else {}
+        self.data = {
+            kind: {l: self._load(self.path(kind, l)) for l in self.layers}
+            for kind in self.kinds
+        }
 
     def path(self, kind, layer):
         tag = f"_{kind}" if layer is None else f"_{kind}_layer{layer}"
@@ -106,8 +110,7 @@ class EmbeddingStore:
     def done_ids(self):
         """IDs present in every output file, so adding a layer or --full on a rerun
         recomputes what is missing."""
-        dicts = list(self.mean_by_layer.values()) + list(self.full_by_layer.values())
-        return set.intersection(*(set(d) for d in dicts))
+        return set.intersection(*(set(d) for by_layer in self.data.values() for d in by_layer.values()))
 
     def add(self, seq_id, per_layer):
         """per_layer: {layer: (L, D) per-residue tensor}, special tokens already removed."""
@@ -115,27 +118,24 @@ class EmbeddingStore:
             # float32 on CPU, cloned so a slice doesn't drag the whole batch's
             # storage into the saved file.
             per_residue = per_layer[layer].detach().to("cpu", torch.float32).clone()
-            if self.full:
-                self.full_by_layer[layer][seq_id] = per_residue
-            self.mean_by_layer[layer][seq_id] = per_residue.mean(dim=0)
+            if "full" in self.data:
+                self.data["full"][layer][seq_id] = per_residue
+            if "mean" in self.data:
+                self.data["mean"][layer][seq_id] = per_residue.mean(dim=0)
 
     def __len__(self):
-        return len(self.mean_by_layer[self.layers[-1]])
+        return len(self.data[self.kinds[0]][self.layers[-1]])
 
     def save(self):
-        for layer in self.layers:
-            if self.full:
-                torch.save(self.full_by_layer[layer], self.path("full", layer))
-            torch.save(self.mean_by_layer[layer], self.path("mean", layer))
+        for kind in self.kinds:
+            for layer in self.layers:
+                torch.save(self.data[kind][layer], self.path(kind, layer))
 
     def report(self):
         print(f"\nSaved {len(self)} embeddings")
         for layer in self.layers:
             name = "embedding" if layer is None else f"layer {layer}"
-            line = f"  {name}: {self.path('mean', layer)}  (mean)"
-            if self.full:
-                line += f"   {self.path('full', layer)}  (full)"
-            print(line)
+            print(f"  {name}: " + "   ".join(f"{self.path(k, layer)}  ({k})" for k in self.kinds))
 
 
 def embed_all(sequences, embed_batch, store, batch_size=8, checkpoint_every=500):
