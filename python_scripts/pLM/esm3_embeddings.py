@@ -15,6 +15,13 @@ https://huggingface.co/EvolutionaryScale/esm3-sm-open-v1 and run
 Layer numbering matches esmc_embeddings.py: 0..N-1 = transformer block outputs
 (N = 48), no final norm applied.
 """
+import contextlib
+import os
+
+# ESM3's residue-annotation embedding uses aten::_embedding_bag, which MPS lacks;
+# let that one op run on CPU. Must be set before torch is imported.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
 import torch
 import typer
 from esm.models.esm3 import ESM3
@@ -43,8 +50,16 @@ def main(
     sequences = load_sequences(fasta_file, max_len)
     dev = pick_device(device)
 
-    # from_pretrained casts to bfloat16 on any non-CPU device
+    # from_pretrained casts the weights to bfloat16 on any non-CPU device, but
+    # forward() feeds some inputs (pLDDT conditioning) in float32. Like the esm
+    # SDK, run under bf16 autocast on CUDA; MPS has no autocast, so use fp32 there.
     model = ESM3.from_pretrained(model_name, device=dev).eval()
+    if dev.type == "cuda":
+        precision = torch.autocast("cuda", dtype=torch.bfloat16)
+    else:
+        model = model.float()
+        precision = contextlib.nullcontext()
+    print(f"Precision: {'bf16 autocast' if dev.type == 'cuda' else 'fp32'}")
     tokenizer = model.tokenizers.sequence
     pad_token_id = tokenizer.pad_token_id
 
@@ -65,16 +80,17 @@ def main(
         ).to(dev)
         B, L = tokens.shape
         captured.clear()
-        model(
-            sequence_tokens=tokens,
-            # Boolean sequence_id keeps padding from attending to real residues
-            # (ESM3 applies no padding mask otherwise).
-            sequence_id=tokens != pad_token_id,
-            # forward() builds these with batch size 1 when omitted; give them
-            # the real batch shape so geometric attention doesn't rely on broadcasting.
-            structure_coords=torch.full((B, L, 3, 3), float("nan"), device=dev),
-            chain_id=torch.zeros((B, L), dtype=torch.long, device=dev),
-        )
+        with precision:
+            model(
+                sequence_tokens=tokens,
+                # Boolean sequence_id keeps padding from attending to real residues
+                # (ESM3 applies no padding mask otherwise).
+                sequence_id=tokens != pad_token_id,
+                # forward() builds these with batch size 1 when omitted; give them
+                # the real batch shape so geometric attention doesn't rely on broadcasting.
+                structure_coords=torch.full((B, L, 3, 3), float("nan"), device=dev),
+                chain_id=torch.zeros((B, L), dtype=torch.long, device=dev),
+            )
         # <cls> SEQ <eos> [<pad> ...]
         return [
             {l: captured[l][i, 1 : len(s) + 1] for l in layers}
