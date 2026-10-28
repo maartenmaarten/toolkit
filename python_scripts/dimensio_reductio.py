@@ -1,15 +1,23 @@
 """Project CAZyDB embeddings (PCA / t-SNE / UMAP / TMAP) and plot the results.
 
-For each requested method: compute the 2D projection, cache the coordinates
-as .npz, join the ids against the CAZy_characterized annotation table, then
-render and save one scatter plot per coloring (none, plus one per --color-by
-column; default Domain, EC, Subf), optionally with marker shapes from a
---shape-by column -- popping each one up on screen as it's made.
+For each requested method: compute the 2D projection (or load it from an
+earlier run's saved files), join the ids against the CAZy_characterized
+annotation table, then render and save one scatter plot per coloring (none,
+plus one per --color-by column; default Domain, EC, Subf), optionally with
+marker shapes from a --shape-by column -- popping each one up on screen as
+it's made.
+
+Output files share the --output prefix, by default projections/<embeddings
+file name without .pt>:
+    PREFIX.<method>.npz                           ids + coordinates (+ TMAP tree edges)
+    PREFIX.tmap.model                             full fitted TMAP (TMAP.save / TMAP.load)
+    PREFIX.<method>[.<color column>][.shape_<shape column>].png
 """
 import argparse
 import ast
 import os
 import time
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -72,10 +80,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shape-by", default=None, metavar="COLUMN",
                          help=f"Annotation column setting the marker shape in every plot; at "
                               f"most {len(SHAPE_MARKERS)} distinct values (default: none)")
-    parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR,
-                         help="Where to write {method}.npz coordinate caches and "
-                              "{method}{coloring}.png plots (default: %(default)s)")
+    parser.add_argument("--output", default=None, metavar="PREFIX",
+                         help="Prefix (may include a directory) for the PREFIX.<method>.npz "
+                              "caches and PREFIX.<method>[.<coloring>].png plots (default: "
+                              f"{DEFAULT_OUTPUT_DIR}/<embeddings file name without .pt>)")
+    parser.add_argument("--recompute", action="store_true",
+                         help="Recompute projections even if a matching PREFIX.<method>.npz "
+                              "cache exists")
     args = parser.parse_args()
+
+    if args.output is None:
+        args.output = os.path.join(DEFAULT_OUTPUT_DIR, Path(args.embeddings).stem)
 
     if args.all:
         args.pca = args.tsne = args.umap = args.tmap = True
@@ -134,16 +149,54 @@ def umap_project(embeddings, n_neighbors=20, min_dist=0.1, metric="cosine"):
 
 
 def tmap_project(embeddings, metric="cosine", n_neighbors=100):
-    model = TMAP(metric=metric, n_neighbors=n_neighbors).fit(standardize(embeddings))
-    return model, model.embedding_
+    return TMAP(metric=metric, n_neighbors=n_neighbors).fit(standardize(embeddings))
 
 
+# Each returns (coords, tree edges or None, fitted model to save or None)
 PROJECTORS = {
-    "pca": lambda emb: (pca_project(emb), None),
-    "tsne": lambda emb: (tsne_project(emb), None),
-    "umap": lambda emb: (umap_project(emb), None),
-    "tmap": lambda emb: (lambda m: (m[1], m[0].tree_.edges))(tmap_project(emb)),
+    "pca": lambda emb: (pca_project(emb), None, None),
+    "tsne": lambda emb: (tsne_project(emb), None, None),
+    "umap": lambda emb: (umap_project(emb), None, None),
+    "tmap": lambda emb: (lambda m: (m.embedding_, m.tree_.edges, m))(tmap_project(emb)),
 }
+
+
+def cache_paths(prefix, method):
+    """(.npz with ids + coords [+ edges], full model file or None). TMAP's model
+    is written with its own TMAP.save() (map, tree with weights, kNN graph,
+    parameters) and read back with TMAP.load()."""
+    return f"{prefix}.{method}.npz", (f"{prefix}.{method}.model" if method == "tmap" else None)
+
+
+def save_projection(prefix, method, ids, coords, edges, model):
+    npz_path, model_path = cache_paths(prefix, method)
+    extra = {} if edges is None else {"edges": np.asarray(edges)}
+    np.savez(npz_path, coords=coords, ids=ids, **extra)
+    print(f"  Saved coords → {npz_path}")
+    if model_path:
+        print(f"  Saved {method.upper()} model → {model.save(model_path)}")
+
+
+def load_projection(prefix, method, ids):
+    """(coords, edges) from an earlier run's cache, or None when there is none
+    or it no longer fits: different ids (e.g. new embeddings under the same
+    name) or, for TMAP, no saved model. TMAP coords and edges come from the
+    saved model."""
+    npz_path, model_path = cache_paths(prefix, method)
+    if not os.path.exists(npz_path):
+        return None
+    cache = np.load(npz_path, allow_pickle=False)
+    if not np.array_equal(cache["ids"], ids):
+        print(f"  Ignoring {npz_path}: its ids differ from the current embeddings")
+        return None
+    if model_path:
+        if not os.path.exists(model_path):
+            print(f"  Ignoring {npz_path}: no saved {method.upper()} model ({model_path})")
+            return None
+        model = TMAP.load(model_path)
+        print(f"  Loaded {method.upper()} model ← {model_path}")
+        return model.embedding_, model.tree_.edges
+    return cache["coords"], None
 
 
 # ----------------------------------------------------------------------
@@ -353,43 +406,47 @@ def main() -> None:
         except ValueError as e:
             raise SystemExit(f"--shape-by: {e}")
     # Shaped plots get their own file names, so they don't overwrite unshaped ones
-    shape_tag = f"_shape_{file_tag(args.shape_by)}" if args.shape_by else ""
-    os.makedirs(args.output_dir, exist_ok=True)
+    shape_tag = f".shape_{file_tag(args.shape_by)}" if args.shape_by else ""
+    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
 
     methods = [name for name in ("pca", "tsne", "umap", "tmap") if getattr(args, name)]
 
     timings = {}
     for method in methods:
-        print(f"\nRunning {method.upper()}…")
-        t0 = time.perf_counter()
-        coords, edges = PROJECTORS[method](embeddings)
-        elapsed = time.perf_counter() - t0
-        timings[method] = elapsed
-        print(f"  {method} done in {elapsed:.1f}s")
-
-        npz_path = os.path.join(args.output_dir, f"{method}.npz")
-        np.savez(npz_path, coords=coords, ids=ids)
-        print(f"  Saved coords → {npz_path}")
+        print(f"\n{method.upper()}")
+        cached = None if args.recompute else load_projection(args.output, method, ids)
+        if cached is not None:
+            coords, edges = cached
+            print("  Reusing the saved projection (--recompute to rerun)")
+        else:
+            print(f"  Running {method.upper()}…")
+            t0 = time.perf_counter()
+            coords, edges, model = PROJECTORS[method](embeddings)
+            elapsed = time.perf_counter() - t0
+            timings[method] = elapsed
+            print(f"  {method} done in {elapsed:.1f}s")
+            save_projection(args.output, method, ids, coords, edges, model)
 
         for col in [None, *args.color_by]:
-            suffix = f"_{file_tag(col)}" if col else ""
-            label = suffix.lstrip("_").replace("_", " ") if suffix else None
+            label = file_tag(col).replace("_", " ") if col else None
             title = f"CAZyDB {method.upper()}" + (f" — {label}" if label else "")
             fig = plot_embedding(coords, "Dim 1", "Dim 2",
                                   color_by=meta[col] if col else None, color_label=col or "colour",
                                   shape_by=shape_by, shape_label=args.shape_by or "shape",
                                   title=title, edges=edges)
 
-            png_path = os.path.join(args.output_dir, f"{method}{suffix}{shape_tag}.png")
+            color_tag = f".{file_tag(col)}" if col else ""
+            png_path = f"{args.output}.{method}{color_tag}{shape_tag}.png"
             fig.savefig(png_path, dpi=600, bbox_inches="tight")
             print(f"  Saved plot → {png_path}")
 
             plt.show()
             plt.close(fig)
 
-    print("\n--- Timings ---")
-    for method, t in timings.items():
-        print(f"  {method:<8} {t:.1f}s")
+    if timings:
+        print("\n--- Timings ---")
+        for method, t in timings.items():
+            print(f"  {method:<8} {t:.1f}s")
 
 
 if __name__ == "__main__":
