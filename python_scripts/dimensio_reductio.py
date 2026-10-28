@@ -31,6 +31,7 @@ from matplotlib.colors import Normalize
 from matplotlib.lines import Line2D
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
+from threadpoolctl import threadpool_limits
 from tmap import TMAP
 
 DEFAULT_EMBEDDINGS = (
@@ -45,9 +46,8 @@ DEFAULT_OUTPUT_DIR = "projections"
 DEFAULT_ID_COLUMN = "GenBank"
 DEFAULT_COLOR_BY = ["Domain", "EC", "Subf"]
 
-# Seed for t-SNE and UMAP, so the same embeddings give the same map every run
-# (UMAP runs single-threaded when seeded)
-RANDOM_STATE = 42
+# Leave one core free by default
+DEFAULT_THREADS = max(1, (os.cpu_count() or 1) - 1)
 
 # Only this many of the most common colour categories get a colour (tab20's);
 # points in any other category are grey, like unannotated ones
@@ -84,11 +84,16 @@ def parse_args() -> argparse.Namespace:
                          help="Prefix (may include a directory) for the PREFIX.<method>.npz "
                               "caches and PREFIX.<method>[.<coloring>].png plots (default: "
                               f"{DEFAULT_OUTPUT_DIR}/<embeddings file name without .pt>)")
+    parser.add_argument("--threads", type=int, default=DEFAULT_THREADS,
+                         help="Threads for PCA, t-SNE and UMAP; -1 = all cores "
+                              "(default: all cores minus one = %(default)s)")
     parser.add_argument("--recompute", action="store_true",
                          help="Recompute projections even if a matching PREFIX.<method>.npz "
                               "cache exists")
     args = parser.parse_args()
 
+    if args.threads == 0 or args.threads < -1:
+        parser.error("--threads must be a positive number, or -1 for all cores")
     if args.output is None:
         args.output = os.path.join(DEFAULT_OUTPUT_DIR, Path(args.embeddings).stem)
 
@@ -137,14 +142,15 @@ def pca_project(embeddings):
     return PCA(n_components=2).fit_transform(standardize(embeddings))
 
 
-def tsne_project(embeddings, perplexity=30):
-    tsne = TSNE(n_components=2, perplexity=perplexity, random_state=RANDOM_STATE)
+# t-SNE and UMAP are unseeded so they can run multi-threaded (a seeded UMAP
+# runs single-threaded); their maps differ slightly between runs.
+def tsne_project(embeddings, perplexity=30, threads=DEFAULT_THREADS):
+    tsne = TSNE(n_components=2, perplexity=perplexity, n_jobs=threads)
     return tsne.fit_transform(standardize(embeddings))
 
 
-def umap_project(embeddings, n_neighbors=20, min_dist=0.1, metric="cosine"):
-    reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, metric=metric,
-                        random_state=RANDOM_STATE)
+def umap_project(embeddings, n_neighbors=20, min_dist=0.1, metric="cosine", threads=DEFAULT_THREADS):
+    reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, metric=metric, n_jobs=threads)
     return reducer.fit_transform(standardize(embeddings))
 
 
@@ -152,12 +158,14 @@ def tmap_project(embeddings, metric="cosine", n_neighbors=100):
     return TMAP(metric=metric, n_neighbors=n_neighbors).fit(standardize(embeddings))
 
 
-# Each returns (coords, tree edges or None, fitted model to save or None)
+# Each takes (embeddings, threads) and returns (coords, tree edges or None,
+# fitted model to save or None). TMAP has no thread setting: its kNN search
+# (usearch) uses all cores and its layout (OGDF) runs on one.
 PROJECTORS = {
-    "pca": lambda emb: (pca_project(emb), None, None),
-    "tsne": lambda emb: (tsne_project(emb), None, None),
-    "umap": lambda emb: (umap_project(emb), None, None),
-    "tmap": lambda emb: (lambda m: (m.embedding_, m.tree_.edges, m))(tmap_project(emb)),
+    "pca": lambda emb, threads: (pca_project(emb), None, None),
+    "tsne": lambda emb, threads: (tsne_project(emb, threads=threads), None, None),
+    "umap": lambda emb, threads: (umap_project(emb, threads=threads), None, None),
+    "tmap": lambda emb, threads: (lambda m: (m.embedding_, m.tree_.edges, m))(tmap_project(emb)),
 }
 
 
@@ -421,7 +429,9 @@ def main() -> None:
         else:
             print(f"  Running {method.upper()}…")
             t0 = time.perf_counter()
-            coords, edges, model = PROJECTORS[method](embeddings)
+            # Also caps BLAS/OpenMP pools (PCA, t-SNE's internals); None = no cap
+            with threadpool_limits(limits=None if args.threads == -1 else args.threads):
+                coords, edges, model = PROJECTORS[method](embeddings, args.threads)
             elapsed = time.perf_counter() - t0
             timings[method] = elapsed
             print(f"  {method} done in {elapsed:.1f}s")
