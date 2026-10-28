@@ -2,8 +2,8 @@
 
 For each requested method: compute the 2D projection, cache the coordinates
 as .npz, join the ids against the CAZy_characterized annotation table, then
-render and save one scatter plot per coloring (none, Domain, EC, Subf) --
-popping each one up on screen as it's made.
+render and save one scatter plot per coloring (none, plus one per --color-by
+column; default Domain, EC, Subf) -- popping each one up on screen as it's made.
 """
 import argparse
 import ast
@@ -33,6 +33,7 @@ DEFAULT_ANNOT_TSV = (
     "2026-06-29_download/CAZy_characterized/GH43_characterized.tsv"
 )
 DEFAULT_OUTPUT_DIR = "projections"
+DEFAULT_COLOR_BY = ["Domain", "EC", "Subf"]
 
 # Seed for t-SNE and UMAP, so the same embeddings give the same map every run
 # (UMAP runs single-threaded when seeded)
@@ -58,8 +59,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embeddings", default=DEFAULT_EMBEDDINGS,
                          help="Torch dict of embeddings, keyed by id (default: %(default)s)")
     parser.add_argument("--annot-tsv", default=DEFAULT_ANNOT_TSV,
-                         help="CAZy_characterized TSV with GenBank/Domain/EC/Subf columns, used "
-                              "to color the plots (default: %(default)s)")
+                         help="CAZy_characterized TSV with a GenBank column plus the "
+                              "--color-by columns (default: %(default)s)")
+    parser.add_argument("--color-by", nargs="+", default=DEFAULT_COLOR_BY, metavar="COLUMN",
+                         help="Annotation column(s) to color by, one plot each, next to the "
+                              "uncolored one (default: %(default)s)")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR,
                          help="Where to write {method}.npz coordinate caches and "
                               "{method}{coloring}.png plots (default: %(default)s)")
@@ -152,19 +156,29 @@ def _clean_ec(ec):
     return ec
 
 
-def load_annotations(annot_tsv: str) -> pd.DataFrame:
-    annot_df = pd.read_csv(annot_tsv, sep="\t", usecols=["GenBank", "Domain", "EC", "Subf"])
-    annot_df["EC"] = annot_df["EC"].map(_clean_ec)
-    # Subf is numeric (e.g. 1.0, 4.0); render as clean ints, keeping NaN as NaN.
-    annot_df["Subf"] = annot_df["Subf"].apply(lambda v: str(int(v)) if pd.notna(v) else np.nan)
+def load_annotations(annot_tsv: str, color_by: list[str]) -> pd.DataFrame:
+    available = pd.read_csv(annot_tsv, sep="\t", nrows=0).columns
+    missing = [c for c in ["GenBank", *color_by] if c not in available]
+    if missing:
+        raise SystemExit(f"Column(s) {missing} not in {annot_tsv}; available: {list(available)}")
+
+    annot_df = pd.read_csv(annot_tsv, sep="\t", usecols=["GenBank", *dict.fromkeys(color_by)])
+    if "EC" in annot_df:
+        annot_df["EC"] = annot_df["EC"].map(_clean_ec)
+    # Whole-number float columns (e.g. Subf: 1.0, 4.0) are labels; render them
+    # as clean ints, keeping NaN as NaN.
+    for col in color_by:
+        values = annot_df[col].dropna()
+        if annot_df[col].dtype.kind == "f" and (values == values.round()).all():
+            annot_df[col] = annot_df[col].apply(lambda v: str(int(v)) if pd.notna(v) else np.nan)
     return annot_df.drop_duplicates("GenBank")
 
 
-def build_meta(ids: np.ndarray, annot_df: pd.DataFrame) -> pd.DataFrame:
+def build_meta(ids: np.ndarray, annot_df: pd.DataFrame, color_by: list[str]) -> pd.DataFrame:
     m = pd.DataFrame({"id": ids}).merge(annot_df, left_on="id", right_on="GenBank", how="left")
-    print(f"  Domain match rate: {m['Domain'].notna().mean():.1%}")
-    print(f"  EC match rate:     {m['EC'].notna().mean():.1%}")
-    print(f"  Subf match rate:   {m['Subf'].notna().mean():.1%}")
+    width = max(len(col) for col in color_by)
+    for col in color_by:
+        print(f"  {col + ' match rate:':<{width + 12}} {m[col].notna().mean():.1%}")
     return m
 
 
@@ -311,7 +325,7 @@ def main() -> None:
     sns.set_theme(style="whitegrid")
 
     ids, embeddings = load_embeddings(args.embeddings)
-    annot_df = load_annotations(args.annot_tsv)
+    annot_df = load_annotations(args.annot_tsv, args.color_by)
     os.makedirs(args.output_dir, exist_ok=True)
 
     methods = [name for name in ("pca", "tsne", "umap", "tmap") if getattr(args, name)]
@@ -330,13 +344,10 @@ def main() -> None:
         print(f"  Saved coords → {npz_path}")
 
         print(f"  Joining annotations for {method}…")
-        meta = build_meta(ids, annot_df)
+        meta = build_meta(ids, annot_df, args.color_by)
 
-        colorings = [
-            ("", None),
-            ("_domain", meta["Domain"]),
-            ("_ec", meta["EC"]),
-            ("_subf", meta["Subf"]),
+        colorings = [("", None)] + [
+            ("_" + "_".join(col.lower().split()), meta[col]) for col in args.color_by
         ]
         for suffix, color_by in colorings:
             label = suffix.lstrip("_").replace("_", " ") if suffix else None
