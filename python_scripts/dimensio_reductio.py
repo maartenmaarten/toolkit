@@ -3,7 +3,8 @@
 For each requested method: compute the 2D projection, cache the coordinates
 as .npz, join the ids against the CAZy_characterized annotation table, then
 render and save one scatter plot per coloring (none, plus one per --color-by
-column; default Domain, EC, Subf) -- popping each one up on screen as it's made.
+column; default Domain, EC, Subf), optionally with marker shapes from a
+--shape-by column -- popping each one up on screen as it's made.
 """
 import argparse
 import ast
@@ -33,6 +34,7 @@ DEFAULT_ANNOT_TSV = (
     "2026-06-29_download/CAZy_characterized/GH43_characterized.tsv"
 )
 DEFAULT_OUTPUT_DIR = "projections"
+DEFAULT_ID_COLUMN = "GenBank"
 DEFAULT_COLOR_BY = ["Domain", "EC", "Subf"]
 
 # Seed for t-SNE and UMAP, so the same embeddings give the same map every run
@@ -59,11 +61,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embeddings", default=DEFAULT_EMBEDDINGS,
                          help="Torch dict of embeddings, keyed by id (default: %(default)s)")
     parser.add_argument("--annot-tsv", default=DEFAULT_ANNOT_TSV,
-                         help="CAZy_characterized TSV with a GenBank column plus the "
-                              "--color-by columns (default: %(default)s)")
+                         help="CAZy_characterized TSV with the --id-column plus the "
+                              "--color-by / --shape-by columns (default: %(default)s)")
+    parser.add_argument("--id-column", default=DEFAULT_ID_COLUMN,
+                         help="Annotation column matched against the embedding ids "
+                              "(default: %(default)s)")
     parser.add_argument("--color-by", nargs="+", default=DEFAULT_COLOR_BY, metavar="COLUMN",
                          help="Annotation column(s) to color by, one plot each, next to the "
                               "uncolored one (default: %(default)s)")
+    parser.add_argument("--shape-by", default=None, metavar="COLUMN",
+                         help=f"Annotation column setting the marker shape in every plot; at "
+                              f"most {len(SHAPE_MARKERS)} distinct values (default: none)")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR,
                          help="Where to write {method}.npz coordinate caches and "
                               "{method}{coloring}.png plots (default: %(default)s)")
@@ -156,30 +164,38 @@ def _clean_ec(ec):
     return ec
 
 
-def load_annotations(annot_tsv: str, color_by: list[str]) -> pd.DataFrame:
+def load_annotations(annot_tsv: str, id_column: str, columns: list[str]) -> pd.DataFrame:
     available = pd.read_csv(annot_tsv, sep="\t", nrows=0).columns
-    missing = [c for c in ["GenBank", *color_by] if c not in available]
+    missing = [c for c in [id_column, *columns] if c not in available]
     if missing:
         raise SystemExit(f"Column(s) {missing} not in {annot_tsv}; available: {list(available)}")
 
-    annot_df = pd.read_csv(annot_tsv, sep="\t", usecols=["GenBank", *dict.fromkeys(color_by)])
-    if "EC" in annot_df:
+    # Ids as strings, so numeric ids still match the embedding keys
+    annot_df = pd.read_csv(annot_tsv, sep="\t", usecols=list(dict.fromkeys([id_column, *columns])),
+                           dtype={id_column: str})
+    if "EC" in columns:
         annot_df["EC"] = annot_df["EC"].map(_clean_ec)
     # Whole-number float columns (e.g. Subf: 1.0, 4.0) are labels; render them
     # as clean ints, keeping NaN as NaN.
-    for col in color_by:
+    for col in columns:
         values = annot_df[col].dropna()
         if annot_df[col].dtype.kind == "f" and (values == values.round()).all():
             annot_df[col] = annot_df[col].apply(lambda v: str(int(v)) if pd.notna(v) else np.nan)
-    return annot_df.drop_duplicates("GenBank")
+    return annot_df.drop_duplicates(id_column)
 
 
-def build_meta(ids: np.ndarray, annot_df: pd.DataFrame, color_by: list[str]) -> pd.DataFrame:
-    m = pd.DataFrame({"id": ids}).merge(annot_df, left_on="id", right_on="GenBank", how="left")
-    width = max(len(col) for col in color_by)
-    for col in color_by:
+def build_meta(ids: np.ndarray, annot_df: pd.DataFrame, id_column: str,
+               columns: list[str]) -> pd.DataFrame:
+    m = pd.DataFrame({"id": ids}).merge(annot_df, left_on="id", right_on=id_column, how="left")
+    width = max(len(col) for col in columns)
+    for col in columns:
         print(f"  {col + ' match rate:':<{width + 12}} {m[col].notna().mean():.1%}")
     return m
+
+
+def file_tag(column: str) -> str:
+    """'Protein Name' -> 'protein_name', for plot file names."""
+    return "_".join(column.lower().split())
 
 
 # ----------------------------------------------------------------------
@@ -325,7 +341,19 @@ def main() -> None:
     sns.set_theme(style="whitegrid")
 
     ids, embeddings = load_embeddings(args.embeddings)
-    annot_df = load_annotations(args.annot_tsv, args.color_by)
+    columns = list(dict.fromkeys(args.color_by + ([args.shape_by] if args.shape_by else [])))
+    annot_df = load_annotations(args.annot_tsv, args.id_column, columns)
+    print(f"Joining annotations on {args.id_column}…")
+    meta = build_meta(ids, annot_df, args.id_column, columns)
+    shape_by = meta[args.shape_by] if args.shape_by else None
+    if args.shape_by:
+        # Fail on too many shape values now rather than after the projections
+        try:
+            shape_markers(shape_by, args.shape_by)
+        except ValueError as e:
+            raise SystemExit(f"--shape-by: {e}")
+    # Shaped plots get their own file names, so they don't overwrite unshaped ones
+    shape_tag = f"_shape_{file_tag(args.shape_by)}" if args.shape_by else ""
     os.makedirs(args.output_dir, exist_ok=True)
 
     methods = [name for name in ("pca", "tsne", "umap", "tmap") if getattr(args, name)]
@@ -343,19 +371,16 @@ def main() -> None:
         np.savez(npz_path, coords=coords, ids=ids)
         print(f"  Saved coords → {npz_path}")
 
-        print(f"  Joining annotations for {method}…")
-        meta = build_meta(ids, annot_df, args.color_by)
-
-        colorings = [("", None)] + [
-            ("_" + "_".join(col.lower().split()), meta[col]) for col in args.color_by
-        ]
-        for suffix, color_by in colorings:
+        for col in [None, *args.color_by]:
+            suffix = f"_{file_tag(col)}" if col else ""
             label = suffix.lstrip("_").replace("_", " ") if suffix else None
             title = f"CAZyDB {method.upper()}" + (f" — {label}" if label else "")
-            fig = plot_embedding(coords, "Dim 1", "Dim 2", color_by=color_by,
+            fig = plot_embedding(coords, "Dim 1", "Dim 2",
+                                  color_by=meta[col] if col else None, color_label=col or "colour",
+                                  shape_by=shape_by, shape_label=args.shape_by or "shape",
                                   title=title, edges=edges)
 
-            png_path = os.path.join(args.output_dir, f"{method}{suffix}.png")
+            png_path = os.path.join(args.output_dir, f"{method}{suffix}{shape_tag}.png")
             fig.savefig(png_path, dpi=600, bbox_inches="tight")
             print(f"  Saved plot → {png_path}")
 
