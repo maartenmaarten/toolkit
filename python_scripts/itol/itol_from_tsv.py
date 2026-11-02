@@ -8,9 +8,12 @@ Input: plain TSV/CSV with a header row.
 
 Pass one or more --col arguments, each produces its own DATASET_COLORSTRIP file.
 
+Pass --tree to only write entries for the leaf labels in that tree (Newick by default,
+see --tree-format). Colors and legends are then built from the tree's leaves only.
+
 Usage:
-    python tsv_to_itol_colorstrip.py --tsv annotations.tsv --outdir itol_annotations/ \
-        --col EC --col Phylum --col Genus
+    python itol_from_tsv.py --tsv annotations.tsv --outdir itol_annotations/ \
+        --col EC --col Phylum --col Genus --tree tree.nwk
 """
 
 import csv
@@ -34,6 +37,16 @@ def _sniff_dialect(path: str):
     with open(path) as fh:
         sample = fh.read(4096)
     return csv.Sniffer().sniff(sample, delimiters="\t")
+
+
+def read_tree_leaves(tree_path: str, tree_format: str = "newick") -> set:
+    from Bio import Phylo
+
+    tree = Phylo.read(tree_path, tree_format)
+    leaves = {t.name.strip() for t in tree.get_terminals() if t.name}
+    if not leaves:
+        sys.exit(f"ERROR: no leaf labels found in tree {tree_path}")
+    return leaves
 
 
 def assign_colors(values: list) -> dict:
@@ -64,7 +77,13 @@ def write_colorstrip(out_path: str, dataset_label: str, id_to_value: dict, color
     print(f"  Wrote {out_path}: {len(id_to_value)} sequences, {len(colors)} unique values")
 
 
-def convert_columns(tsv_path: str, outdir: str, columns: list, id_col: Optional[str] = None):
+def convert_columns(
+    tsv_path: str,
+    outdir: str,
+    columns: list,
+    id_col: Optional[str] = None,
+    keep_ids: Optional[set] = None,
+):
     dialect = _sniff_dialect(tsv_path)
     with open(tsv_path, newline="") as fh:
         reader = csv.DictReader(fh, dialect=dialect)
@@ -89,8 +108,18 @@ def convert_columns(tsv_path: str, outdir: str, columns: list, id_col: Optional[
             seq_id = row[resolved_id_col].strip()
             if not seq_id:
                 continue
+            if keep_ids is not None and seq_id not in keep_ids:
+                continue
             for col in columns:
                 value_maps[col][seq_id] = row[col].strip()
+
+    if keep_ids is not None:
+        found = set(value_maps[columns[0]])
+        print(f"  Tree leaves: {len(keep_ids)}, matched in annotations: {len(found)}")
+        not_found = sorted(keep_ids - found)
+        if not_found:
+            preview = ", ".join(not_found[:10]) + (" ..." if len(not_found) > 10 else "")
+            print(f"  WARNING: {len(not_found)} tree leaves not in annotations: {preview}")
 
     Path(outdir).mkdir(parents=True, exist_ok=True)
 
@@ -117,6 +146,12 @@ if __name__ == "__main__":
         help="Column name to convert (repeatable, e.g. --col EC --col Phylum)"
     )
     parser.add_argument("--id-col", help="Override auto-detected sequence ID column")
+    parser.add_argument("--tree", help="Tree file; only its leaf labels are written")
+    parser.add_argument(
+        "--tree-format", default="newick",
+        help="Tree format for --tree, as accepted by Bio.Phylo (default: newick)"
+    )
     args = parser.parse_args()
 
-    convert_columns(args.tsv, args.outdir, args.columns, args.id_col)
+    keep_ids = read_tree_leaves(args.tree, args.tree_format) if args.tree else None
+    convert_columns(args.tsv, args.outdir, args.columns, args.id_col, keep_ids)

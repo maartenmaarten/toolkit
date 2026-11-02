@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Optional
 import seaborn as sns
 
-from itol_from_topology import parse_3line
+from itol.itol_from_topology import parse_3line
 
 
 # ── column alias maps (plain TSV mode) ────────────────────────────────────────
